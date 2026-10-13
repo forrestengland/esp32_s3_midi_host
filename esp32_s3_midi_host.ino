@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 #include <math.h>
 
@@ -24,6 +23,9 @@ bool midiDisplayDirty = false;
 
 uint32_t lastDisplayUpdate = 0;
 constexpr uint32_t DISPLAY_INTERVAL_MS = 100;
+
+// Protect shared audio parameters between MIDI and audio tasks
+portMUX_TYPE synthMux = portMUX_INITIALIZER_UNLOCKED;
 
 // -------- I2S wiring --------
 constexpr int I2S_BCLK = 5;
@@ -90,35 +92,38 @@ void setupAudio() {
 
 void setNoteOn(int note, int velocity) {
   if (velocity <= 0) {
-    if (activeNote == note) {
-      targetAmplitude = 0.0f;
-    }
+    setNoteOff(note);
     return;
   }
 
-  activeNote = note;
-
-  // MIDI note 69 = A4 = 440 Hz
   float frequency = 440.0f *
       powf(2.0f, (note - 69) / 12.0f);
 
-  phaseIncrement = TWO_PI * frequency / SAMPLE_RATE;
+  float increment = TWO_PI * frequency / SAMPLE_RATE;
+  float amplitude = MAX_AMPLITUDE * (velocity / 127.0f);
 
-  targetAmplitude =
-      MAX_AMPLITUDE * (velocity / 127.0f);
+  portENTER_CRITICAL(&synthMux);
+  activeNote = note;
+  phaseIncrement = increment;
+  targetAmplitude = amplitude;
+  portEXIT_CRITICAL(&synthMux);
 
-  Serial.printf(
-      "Note ON: %d, frequency: %.2f Hz\n",
-      note, frequency
-  );
+  Serial.printf("Note ON: %d, frequency: %.2f Hz\n",
+                note, frequency);
 }
 
 void setNoteOff(int note) {
-  // Only release the currently sounding note
+  bool released = false;
+
+  portENTER_CRITICAL(&synthMux);
   if (activeNote == note) {
     targetAmplitude = 0.0f;
     activeNote = -1;
+    released = true;
+  }
+  portEXIT_CRITICAL(&synthMux);
 
+  if (released) {
     Serial.printf("Note OFF: %d\n", note);
   }
 }
@@ -155,6 +160,7 @@ void logMidiMessage(const char* type, int note,
 }
 
 void drawMidiLog() {
+
   if (!midiDisplayDirty) {
     return;
   }
@@ -229,66 +235,71 @@ void processMidi() {
 }
 
 void loop() {
-
-  // Handle MIDI before producing each audio block
   processMidi();
 
-  // Interleaved left/right 16-bit samples
+  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
+    lastDisplayUpdate = millis();
+    drawMidiLog();
+  }
+}
+
+void audioTask(void* parameter) {
   int16_t buffer[BLOCK_FRAMES * 2];
 
-  // Approximately 5 ms attack/release ramp
   constexpr float RAMP_STEP =
       1.0f / (SAMPLE_RATE * 0.005f);
 
-  for (int i = 0; i < BLOCK_FRAMES; i++) {
-    if (currentAmplitude < targetAmplitude) {
-      currentAmplitude += RAMP_STEP;
-      if (currentAmplitude > targetAmplitude) {
-        currentAmplitude = targetAmplitude;
+  for (;;) {
+    // Take a consistent snapshot of MIDI-controlled parameters.
+    float blockTargetAmplitude;
+    float blockPhaseIncrement;
+
+    portENTER_CRITICAL(&synthMux);
+    blockTargetAmplitude = targetAmplitude;
+    blockPhaseIncrement = phaseIncrement;
+    portEXIT_CRITICAL(&synthMux);
+
+    for (int i = 0; i < BLOCK_FRAMES; i++) {
+      if (currentAmplitude < blockTargetAmplitude) {
+        currentAmplitude += RAMP_STEP;
+        if (currentAmplitude > blockTargetAmplitude)
+          currentAmplitude = blockTargetAmplitude;
+      } else if (currentAmplitude > blockTargetAmplitude) {
+        currentAmplitude -= RAMP_STEP;
+        if (currentAmplitude < blockTargetAmplitude)
+          currentAmplitude = blockTargetAmplitude;
       }
-    } else if (currentAmplitude > targetAmplitude) {
-      currentAmplitude -= RAMP_STEP;
-      if (currentAmplitude < targetAmplitude) {
-        currentAmplitude = targetAmplitude;
+
+      float sample = 0.0f;
+
+      if (currentAmplitude > 0.00001f) {
+        sample = sinf(phase) * currentAmplitude;
+
+        phase += blockPhaseIncrement;
+        if (phase >= TWO_PI)
+          phase -= TWO_PI;
       }
+
+      int16_t pcm = (int16_t)(sample * 32767.0f);
+
+      buffer[i * 2] = pcm;
+      buffer[i * 2 + 1] = pcm;
     }
 
-    float sample = 0.0f;
+    size_t bytesWritten = 0;
 
-    if (currentAmplitude > 0.00001f) {
-      sample = sinf(phase) * currentAmplitude;
+    esp_err_t result = i2s_channel_write(
+        txHandle,
+        buffer,
+        sizeof(buffer),
+        &bytesWritten,
+        1000
+    );
 
-      phase += phaseIncrement;
-      if (phase >= TWO_PI) {
-        phase -= TWO_PI;
-      }
+    if (result != ESP_OK) {
+      Serial.printf("I2S write error: %d\n", result);
     }
-
-    int16_t pcm =
-        (int16_t)(sample * 32767.0f);
-
-    buffer[i * 2] = pcm;       // Left
-    buffer[i * 2 + 1] = pcm;   // Right
   }
-
-  size_t bytesWritten = 0;
-
-  esp_err_t result = i2s_channel_write(
-      txHandle,
-      buffer,
-      sizeof(buffer),
-      &bytesWritten,
-      1000
-  );
-
-  if (result != ESP_OK) {
-    Serial.printf("I2S write error: %d\n", result);
-  }
-
-	if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
-		lastDisplayUpdate = millis();
-		drawMidiLog();
-	}
 }
 
 void setup() {
@@ -308,6 +319,23 @@ void setup() {
   Serial.println("USB MIDI Sine Synth");
 
   setupAudio();
+
+	BaseType_t taskResult = xTaskCreatePinnedToCore(
+																									audioTask,
+																									"AudioTask",
+																									4096,
+																									nullptr,
+																									3,
+																									nullptr,
+																									0                 // Core 0
+																									);
+
+	if (taskResult != pdPASS) {
+		Serial.println("ERROR: Failed to create audio task!");
+		while (true) {
+			delay(1000);
+		}
+	}	
 
   midiHandler.addTransport(&usbHost);
   usbHost.begin();
