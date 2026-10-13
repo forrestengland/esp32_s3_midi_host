@@ -7,6 +7,24 @@
 
 #include "driver/i2s_std.h"
 
+#include <TFT_eSPI.h>
+
+TFT_eSPI tft = TFT_eSPI();
+
+constexpr int MIDI_LOG_LINES = 8;
+
+struct MidiLogEntry {
+  char text[40];
+  uint16_t color;
+};
+
+MidiLogEntry midiLog[MIDI_LOG_LINES];
+int midiLogCount = 0;
+bool midiDisplayDirty = false;
+
+uint32_t lastDisplayUpdate = 0;
+constexpr uint32_t DISPLAY_INTERVAL_MS = 100;
+
 // -------- I2S wiring --------
 constexpr int I2S_BCLK = 5;
 constexpr int I2S_LRCK = 6;
@@ -105,6 +123,58 @@ void setNoteOff(int note) {
   }
 }
 
+const char* noteName(int note) {
+  static const char* names[] = {
+    "C", "C#", "D", "D#", "E", "F",
+    "F#", "G", "G#", "A", "A#", "B"
+  };
+
+  static char name[8];
+  snprintf(name, sizeof(name), "%s%d",
+           names[note % 12], note / 12 - 1);
+  return name;
+}
+
+void logMidiMessage(const char* type, int note,
+                    int velocity, int channel,
+                    uint16_t color) {
+  if (midiLogCount < MIDI_LOG_LINES) {
+    midiLogCount++;
+  }
+
+  for (int i = midiLogCount - 1; i > 0; i--) {
+    midiLog[i] = midiLog[i - 1];
+  }
+
+  snprintf(midiLog[0].text, sizeof(midiLog[0].text),
+           "%-7s CH%u %-4s V%03d",
+           type, channel, noteName(note), velocity);
+
+  midiLog[0].color = color;
+  midiDisplayDirty = true;
+}
+
+void drawMidiLog() {
+  if (!midiDisplayDirty) {
+    return;
+  }
+
+  midiDisplayDirty = false;
+
+  // Clear only the message area, preserving the header.
+  tft.fillRect(0, 42, 320, 198, TFT_BLACK);
+
+  tft.setTextSize(1);
+
+  for (int i = 0; i < midiLogCount; i++) {
+    int y = 48 + i * 23;
+
+    tft.setTextColor(midiLog[i].color, TFT_BLACK);
+    tft.setCursor(10, y);
+    tft.println(midiLog[i].text);
+  }
+}
+
 void processMidi() {
   midiHandler.task();
 
@@ -137,15 +207,29 @@ void processMidi() {
     }
 
     // Note On with velocity zero means Note Off
-    if (status == 0x90 && velocity > 0) {
-      setNoteOn(note, velocity);
-    } else {
-      setNoteOff(note);
-    }
+		//   if (status == 0x90 && velocity > 0) {
+		//      setNoteOn(note, velocity);
+		//    } else {
+		//      setNoteOff(note);
+		//    }
+		int channel = (ev.statusCode & 0x0F) + 1;
+
+		if (status == 0x90 && velocity > 0) {
+			setNoteOn(note, velocity);
+
+			logMidiMessage(
+										 "NOTE ON", note, velocity, channel, TFT_GREEN);
+		} else {
+			setNoteOff(note);
+
+			logMidiMessage(
+										 "NOTE OFF", note, velocity, channel, TFT_YELLOW);
+		}		
   }
 }
 
 void loop() {
+
   // Handle MIDI before producing each audio block
   processMidi();
 
@@ -200,10 +284,25 @@ void loop() {
   if (result != ESP_OK) {
     Serial.printf("I2S write error: %d\n", result);
   }
+
+	if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
+		lastDisplayUpdate = millis();
+		drawMidiLog();
+	}
 }
 
 void setup() {
   Serial.begin(115200);
+
+	tft.init();
+	tft.setRotation(1);  // Landscape
+	tft.fillScreen(TFT_BLACK);
+	tft.setTextSize(2);
+	tft.setTextColor(TFT_GREEN, TFT_BLACK);
+	tft.setCursor(10, 10);
+	tft.println("MIDI MONITOR");
+	tft.drawFastHLine(10, 35, 300, TFT_DARKGREY);
+	
   delay(500);
 
   Serial.println("USB MIDI Sine Synth");
