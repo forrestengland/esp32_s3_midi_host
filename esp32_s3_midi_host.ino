@@ -508,4 +508,6 @@ void setup() {
   midiHandler.begin();
 
   Serial.println("Ready. Press a key on your MIDI keyboard.");
+
+	setNoteOn(60, 127);
 }
