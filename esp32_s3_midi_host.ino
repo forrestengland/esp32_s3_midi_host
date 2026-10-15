@@ -11,6 +11,8 @@
 #include <SPI.h>
 #include <SD.h>
 
+#include "mjpeg_video.h"
+
 constexpr int SD_CS = 10;
 constexpr int SD_MISO = 9;
 
@@ -243,6 +245,7 @@ void processMidi() {
 void loop() {
 
   processMidi();
+	delay(1);
 
 	//  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
 	//    lastDisplayUpdate = millis();
@@ -451,11 +454,11 @@ void setup() {
 	
 	Serial.println("Initializing SD...");
 
-	bool sdOK = SD.begin(10, tftSPI, 1000000);
+	bool sdOK = SD.begin(10, tftSPI, 20000000);
 	//	bool sdOK = SD.begin(10);
 	Serial.printf("SD init: %s\n", sdOK ? "OK" : "FAILED");
 
-	Serial.println("Testing TFT...");
+	/*	Serial.println("Testing TFT...");
 	tft.fillScreen(TFT_RED);
 	Serial.println("TFT fill complete");
 
@@ -467,7 +470,9 @@ void setup() {
 		drawBmp("/SUNSET.BMP", 0, 0);
 	} else {
 		Serial.println("BMP open failed");
-	}
+		} */
+
+	if (sdOK) videoBegin("/video.mjpeg");
 
 	//	tft.setTextSize(2);
 	//	tft.setTextColor(TFT_GREEN, TFT_BLACK);
