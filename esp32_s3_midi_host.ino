@@ -8,6 +8,12 @@
 
 #include <TFT_eSPI.h>
 
+#include <SPI.h>
+#include <SD.h>
+
+constexpr int SD_CS = 10;
+constexpr int SD_MISO = 9;
+
 TFT_eSPI tft = TFT_eSPI();
 
 constexpr int MIDI_LOG_LINES = 8;
@@ -235,12 +241,13 @@ void processMidi() {
 }
 
 void loop() {
+
   processMidi();
 
-  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
-    lastDisplayUpdate = millis();
-    drawMidiLog();
-  }
+	//  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
+	//    lastDisplayUpdate = millis();
+	//    drawMidiLog();
+	//  }
 }
 
 void audioTask(void* parameter) {
@@ -302,18 +309,172 @@ void audioTask(void* parameter) {
   }
 }
 
+
+bool drawBmp(const char *filename, int16_t x, int16_t y) {
+
+	Serial.println("BMP: opening file");
+
+    File bmp = SD.open(filename, FILE_READ);
+
+    Serial.println("BMP: open returned");
+
+    if (!bmp) {
+        Serial.printf("Cannot open %s\n", filename);
+        return false;
+    }
+
+    Serial.println("BMP: file opened");
+
+    // BMP header
+    if (bmp.read() != 'B' || bmp.read() != 'M') {
+        Serial.println("Not a valid BMP file");
+        bmp.close();
+        return false;
+    }
+
+    bmp.seek(10);
+    uint32_t pixelOffset;
+    bmp.read((uint8_t *)&pixelOffset, 4);
+
+    bmp.seek(18);
+    int32_t width, height;
+    bmp.read((uint8_t *)&width, 4);
+    bmp.read((uint8_t *)&height, 4);
+
+    uint16_t planes, depth;
+    uint32_t compression;
+
+    bmp.seek(26);
+    bmp.read((uint8_t *)&planes, 2);
+    bmp.read((uint8_t *)&depth, 2);
+    bmp.read((uint8_t *)&compression, 4);
+
+    if (width != 320 || abs(height) != 240 ||
+        planes != 1 || depth != 24 || compression != 0) {
+        Serial.printf(
+            "Unsupported BMP: %ldx%ld, %u-bit, compression %lu\n",
+            (long)width, (long)height, depth, (unsigned long)compression
+        );
+        bmp.close();
+        return false;
+    }
+
+    // BMP rows are padded to a multiple of 4 bytes.
+    uint32_t rowSize = (width * 3 + 3) & ~3;
+    bool bottomUp = height > 0;
+    uint8_t row[320 * 3 + 4];
+
+    // Send each row as RGB565 pixels.
+    uint16_t pixels[320];
+
+		Serial.println("BMP: starting pixel loop");
+
+    for (int rowIndex = 0; rowIndex < 240; rowIndex++) {
+        int sourceRow = bottomUp ? 239 - rowIndex : rowIndex;
+
+        if (rowIndex == 0) {
+            Serial.println("BMP: seeking first row");
+        }
+
+        bmp.seek(pixelOffset + (uint32_t)sourceRow * rowSize);
+
+        if (rowIndex == 0) {
+            Serial.println("BMP: reading first row");
+        }
+
+        int bytesRead = bmp.read(row, rowSize);
+
+        if (rowIndex == 0) {
+            Serial.printf("BMP: first row read %d bytes\n", bytesRead);
+        }
+
+        if (bytesRead != (int)rowSize) {
+            Serial.println("Error reading BMP pixels");
+            bmp.close();
+            return false;
+        }
+
+        for (int col = 0; col < 320; col++) {
+            uint8_t b = row[col * 3 + 0];
+            uint8_t g = row[col * 3 + 1];
+            uint8_t r = row[col * 3 + 2];
+
+            pixels[col] = tft.color565(r, g, b);
+        }
+
+        if (rowIndex == 0) {
+            Serial.println("BMP: pushing first row to TFT");
+        }
+
+				tft.startWrite();
+				tft.setAddrWindow(x, y + rowIndex, 320, 1);
+				tft.pushColors(pixels, 320, true);
+				tft.endWrite();
+				//        tft.pushImage(x, y + rowIndex, 320, 1, pixels);
+
+        if (rowIndex == 0) {
+            Serial.println("BMP: first row displayed");
+        }
+    }
+
+		Serial.println("BMP: finished pixel loop");
+
+    bmp.close();
+    Serial.printf("Displayed %s\n", filename);
+    return true;
+}
+
+
 void setup() {
-  Serial.begin(115200);
+
+	Serial.begin(115200);
+
+	pinMode(10, OUTPUT);
+	digitalWrite(10, HIGH);
 
 	tft.init();
-	tft.setRotation(1);  // Landscape
+	tft.setRotation(1);
 	tft.fillScreen(TFT_BLACK);
-	tft.setTextSize(2);
-	tft.setTextColor(TFT_GREEN, TFT_BLACK);
-	tft.setCursor(10, 10);
-	tft.println("MIDI MONITOR");
-	tft.drawFastHLine(10, 35, 300, TFT_DARKGREY);
+
+	Serial.printf("TFT_MOSI=%d, TFT_SCLK=%d, TFT_MISO=%d\n",
+              TFT_MOSI, TFT_SCLK, TFT_MISO);
+
+	Serial.println("Initializing SD...");
+
+	SPIClass& tftSPI = tft.getSPIinstance();
+
+	//	tftSPI.begin(36, 9, 35, -1);
+	//	SPI.begin(36, 9, 35, 10);
+
+	//	Serial.printf("TFT SPI: %p\n", (void*)&tftSPI);
+	//	Serial.printf("Global SPI: %p\n", (void*)&SPI);
 	
+	Serial.println("Initializing SD...");
+
+	bool sdOK = SD.begin(10, tftSPI, 1000000);
+	//	bool sdOK = SD.begin(10);
+	Serial.printf("SD init: %s\n", sdOK ? "OK" : "FAILED");
+
+	Serial.println("Testing TFT...");
+	tft.fillScreen(TFT_RED);
+	Serial.println("TFT fill complete");
+
+	File bmp = SD.open("/SUNSET.BMP", FILE_READ);
+
+	if (bmp) {
+		Serial.println("BMP opened successfully");
+		bmp.close();
+		drawBmp("/SUNSET.BMP", 0, 0);
+	} else {
+		Serial.println("BMP open failed");
+	}
+
+	//	tft.setTextSize(2);
+	//	tft.setTextColor(TFT_GREEN, TFT_BLACK);
+	//	tft.setCursor(10, 10);
+	//	tft.println("MIDI MONITOR");
+	//	tft.drawFastHLine(10, 35, 300, TFT_DARKGREY);
+
   delay(500);
 
   Serial.println("USB MIDI Sine Synth");
