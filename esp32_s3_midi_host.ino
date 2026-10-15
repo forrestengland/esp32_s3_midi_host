@@ -59,7 +59,9 @@ float phaseIncrement = 0.0f;
 // -------- I2S driver --------
 i2s_chan_handle_t txHandle = nullptr;
 
-void setupAudio() {
+#include "audio_duplex.h"
+
+/* void setupAudio() {
   i2s_chan_config_t chanConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
 
@@ -96,7 +98,7 @@ void setupAudio() {
   ESP_ERROR_CHECK(i2s_channel_enable(txHandle));
 
   Serial.println("I2S audio started.");
-}
+	} */
 
 void setNoteOn(int note, int velocity) {
   if (velocity <= 0) {
@@ -245,6 +247,14 @@ void processMidi() {
 void loop() {
 
   processMidi();
+
+	static uint32_t lastPrint = 0;
+	if (millis() - lastPrint > 500) {
+		lastPrint = millis();
+		Serial.printf("RX err=%d bytes=%u  L min=%d max=%d\n",
+									dbgRx, (unsigned)dbgBytes, dbgMin, dbgMax);
+	}
+ 
 	delay(1);
 
 	//  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
@@ -253,7 +263,7 @@ void loop() {
 	//  }
 }
 
-void audioTask(void* parameter) {
+/* void audioTask(void* parameter) {
   int16_t buffer[BLOCK_FRAMES * 2];
 
   constexpr float RAMP_STEP =
@@ -311,7 +321,7 @@ void audioTask(void* parameter) {
     }
   }
 }
-
+*/
 
 bool drawBmp(const char *filename, int16_t x, int16_t y) {
 
@@ -486,6 +496,8 @@ void setup() {
 
   setupAudio();
 
+	passthroughEnabled = 1;
+
 	BaseType_t taskResult = xTaskCreatePinnedToCore(
 																									audioTask,
 																									"AudioTask",
@@ -509,5 +521,5 @@ void setup() {
 
   Serial.println("Ready. Press a key on your MIDI keyboard.");
 
-	setNoteOn(60, 127);
+	//	setNoteOn(60, 127);
 }
