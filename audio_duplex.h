@@ -22,8 +22,7 @@ constexpr int I2S_MCLK = 1;   // PCM1808 SCK
 
 i2s_chan_handle_t rxHandle = nullptr;
 
-// Toggle at runtime. Written by loop(), read by the audio task.
-// volatile bool passthroughEnabled = false;
+// passthroughEnabled (the on/off flag) lives in audio_shared.h.
 
 // 1.0 = input passes at full level. Lower it if the input plus synth clips.
 constexpr float PASSTHROUGH_GAIN = 1.0f;
@@ -97,6 +96,9 @@ void audioTask(void* parameter) {
     blockTargetAmplitude = targetAmplitude;
     blockPhaseIncrement = phaseIncrement;
     portEXIT_CRITICAL(&synthMux);
+
+    // Synth switched off from the menu: ramp to silence (no clicks).
+    if (!synthEnabled) blockTargetAmplitude = 0.0f;
 
     // Always read the ADC so RX never overruns.
     size_t bytesRead = 0;

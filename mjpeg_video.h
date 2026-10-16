@@ -1,16 +1,17 @@
-// mjpeg_video.h  (v4: media task with menu)
-// One task owns the TFT and the SD card and runs in one of four states:
+// mjpeg_video.h  (v5: media task with menu, MIDI monitor, synth toggle)
+// One task owns the TFT and the SD card and runs in one of five states:
 //   M_MENU   - menu on screen (default at boot)
 //   M_VIDEO  - MJPEG playback
 //   M_RECORD - writes ADC audio to /rec.raw
 //   M_PLAY   - streams /rec.raw into the audio output
+//   M_MIDI   - live MIDI monitor
 //
 // Encoder events (ui_events.h) drive the menu. Click or long press leaves
-// video, recording and playback and returns to the menu.
+// any screen and returns to the menu.
 //
 // Raw file format: signed 16-bit little-endian, stereo, 44100 Hz.
 //
-// Requires: JPEGDEC library, audio_shared.h, ui_events.h.
+// Requires: JPEGDEC library, audio_shared.h, ui_events.h, midi_log.h.
 // Only the media task may touch the TFT or SD after videoBegin().
 
 #pragma once
@@ -22,6 +23,7 @@
 #include "esp_heap_caps.h"
 #include "audio_shared.h"
 #include "ui_events.h"
+#include "midi_log.h"
 
 extern TFT_eSPI tft;
 
@@ -41,20 +43,28 @@ constexpr size_t      BLOCK_BYTES_MIN   = 128 * 2 * 2;   // one audio block (BLO
 enum MediaCmd : uint8_t { CMD_NONE = 0, CMD_REC_START, CMD_PLAY_START, CMD_VIDEO_START, CMD_STOP };
 volatile MediaCmd mediaCmd = CMD_NONE;
 
-enum MediaState : uint8_t { M_MENU, M_VIDEO, M_RECORD, M_PLAY };
+enum MediaState : uint8_t { M_MENU, M_VIDEO, M_RECORD, M_PLAY, M_MIDI };
 static MediaState mediaState = M_MENU;
 
 // ---- Menu ----
-enum MenuItem : uint8_t { MI_VIDEO = 0, MI_RECORD, MI_PLAY, MI_PASSTHROUGH, MENU_COUNT };
-static const char* MENU_ITEMS[MENU_COUNT] = {
-  "Play video", "Record", "Play recording", "Passthrough"
+enum MenuItem : uint8_t {
+  MI_VIDEO = 0, MI_RECORD, MI_PLAY, MI_MIDI, MI_PASSTHROUGH, MI_SYNTH, MENU_COUNT
 };
-constexpr int MENU_TOP   = 44;
-constexpr int MENU_ROW_H = 44;
+static const char* MENU_ITEMS[MENU_COUNT] = {
+  "Play video", "Record", "Play recording", "MIDI monitor", "Passthrough", "Synth"
+};
+constexpr int MENU_TOP   = 40;
+constexpr int MENU_ROW_H = 32;
 
 static int  menuIndex = 0;
 static bool menuDirty = false;
 static bool drawnPass = false;
+static bool drawnSynth = true;
+
+// ---- MIDI monitor ----
+constexpr int MONITOR_TOP   = 40;
+constexpr int MONITOR_ROW_H = 24;
+static uint32_t midiDrawnSeq = 0xFFFFFFFF;
 
 // ---- Video state ----
 static File      videoFile;
@@ -125,21 +135,24 @@ static void drawMenuRows() {
     uint16_t bg = sel ? TFT_NAVY : TFT_BLACK;
     uint16_t fg = sel ? TFT_WHITE : TFT_LIGHTGREY;
 
-    tft.fillRect(0, y, VIDEO_W, MENU_ROW_H - 4, bg);
+    tft.fillRect(0, y, VIDEO_W, MENU_ROW_H - 3, bg);
 
     if (i == MI_PASSTHROUGH) {
       snprintf(label, sizeof(label), "Passthrough: %s", passthroughEnabled ? "ON" : "OFF");
+    } else if (i == MI_SYNTH) {
+      snprintf(label, sizeof(label), "Synth: %s", synthEnabled ? "ON" : "OFF");
     } else {
       snprintf(label, sizeof(label), "%s", MENU_ITEMS[i]);
     }
 
     tft.setTextColor(fg, bg);
-    tft.setCursor(14, y + 12);
+    tft.setCursor(14, y + 7);
     tft.print(label);
   }
 
   menuDirty = false;
   drawnPass = passthroughEnabled;
+  drawnSynth = synthEnabled;
 }
 
 static void enterMenu() {
@@ -148,15 +161,63 @@ static void enterMenu() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextSize(3);
-  tft.setCursor(14, 10);
+  tft.setCursor(14, 8);
   tft.print("MENU");
 
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.setTextSize(1);
-  tft.setCursor(14, 228);
-  tft.print("turn: select   click: go   long press: back");
+  tft.setCursor(100, 16);
+  tft.print("turn: select  click: go  hold: back");
 
   drawMenuRows();
+}
+
+// ------------------------------------------------------------------
+// MIDI monitor
+// ------------------------------------------------------------------
+
+static void drawMidiRows() {
+  MidiLogEntry snap[MIDI_LOG_LINES];
+  uint32_t seq = midiLogSnapshot(snap);
+  int count = (seq < (uint32_t)MIDI_LOG_LINES) ? (int)seq : MIDI_LOG_LINES;
+
+  // Total event counter, top right.
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu   ", (unsigned long)seq);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.setCursor(230, 10);
+  tft.print(buf);
+
+  for (int i = 0; i < MIDI_LOG_LINES; i++) {
+    int y = MONITOR_TOP + i * MONITOR_ROW_H;
+    tft.fillRect(0, y, VIDEO_W, MONITOR_ROW_H, TFT_BLACK);
+    if (i < count) {
+      tft.setTextColor(snap[i].color, TFT_BLACK);
+      tft.setCursor(10, y + 4);
+      tft.print(snap[i].text);
+    }
+  }
+
+  if (count == 0) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setCursor(10, MONITOR_TOP + 4);
+    tft.print("Waiting for MIDI...");
+  }
+
+  midiDrawnSeq = seq;
+}
+
+static void enterMidiMonitor() {
+  mediaState = M_MIDI;
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(14, 10);
+  tft.print("MIDI MONITOR");
+
+  drawMidiRows();
 }
 
 // ------------------------------------------------------------------
@@ -456,11 +517,16 @@ static void playStep() {
 
 static void menuSelect() {
   switch (menuIndex) {
-    case MI_VIDEO:       startVideo();     break;
-    case MI_RECORD:      startRecording(); break;
-    case MI_PLAY:        startPlayback();  break;
+    case MI_VIDEO:       startVideo();        break;
+    case MI_RECORD:      startRecording();    break;
+    case MI_PLAY:        startPlayback();     break;
+    case MI_MIDI:        enterMidiMonitor();  break;
     case MI_PASSTHROUGH:
       passthroughEnabled = !passthroughEnabled;
+      menuDirty = true;
+      break;
+    case MI_SYNTH:
+      synthEnabled = !synthEnabled;
       menuDirty = true;
       break;
   }
@@ -481,6 +547,7 @@ static void handleUi(UiEvent ev) {
       break;
 
     case M_VIDEO:
+    case M_MIDI:
       if (ev == UI_CLICK || ev == UI_LONG) enterMenu();
       break;
 
@@ -496,7 +563,7 @@ static void handleUi(UiEvent ev) {
 
 // Serial commands: usable in addition to the encoder.
 static void handleCmd(MediaCmd cmd) {
-  bool idle = (mediaState == M_MENU || mediaState == M_VIDEO);
+  bool idle = (mediaState == M_MENU || mediaState == M_VIDEO || mediaState == M_MIDI);
 
   switch (cmd) {
     case CMD_REC_START:
@@ -514,7 +581,7 @@ static void handleCmd(MediaCmd cmd) {
     case CMD_STOP:
       if (mediaState == M_RECORD) stopRecording();
       else if (mediaState == M_PLAY) stopPlayback();
-      else if (mediaState == M_VIDEO) enterMenu();
+      else if (mediaState == M_VIDEO || mediaState == M_MIDI) enterMenu();
       break;
 
     default:
@@ -543,13 +610,19 @@ static void mediaTask(void*) {
 
     switch (mediaState) {
       case M_MENU:
-        // Redraw once per batch of events (and if passthrough changed via serial).
-        if (menuDirty || drawnPass != passthroughEnabled) drawMenuRows();
+        // Redraw once per batch of events (and if a flag changed via serial).
+        if (menuDirty || drawnPass != passthroughEnabled || drawnSynth != synthEnabled) {
+          drawMenuRows();
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
         break;
       case M_VIDEO:  videoStep();  break;
       case M_RECORD: recordStep(); break;
       case M_PLAY:   playStep();   break;
+      case M_MIDI:
+        if (midiLogSeq != midiDrawnSeq) drawMidiRows();
+        vTaskDelay(pdMS_TO_TICKS(15));
+        break;
     }
   }
 }

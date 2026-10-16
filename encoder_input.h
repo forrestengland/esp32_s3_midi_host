@@ -22,7 +22,7 @@ constexpr int ENC_SW  = 48;   // PLACEHOLDER: change to a free GPIO your TFT doe
 
 // ---- Tuning ----
 constexpr int      COUNTS_PER_DETENT = 4;     // full-quad counts per click; try 2 or 1 if it skips
-constexpr bool     ENC_REVERSE       = false; // flip if clockwise moves the menu up
+constexpr bool     ENC_REVERSE       = true; // flip if clockwise moves the menu up
 constexpr uint32_t DEBOUNCE_MS       = 25;
 constexpr uint32_t LONG_PRESS_MS     = 600;
 
