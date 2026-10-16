@@ -631,25 +631,27 @@ static void mediaTask(void*) {
 bool videoBegin(const char* path) {
   uiEventsInit();
 
-  mjpegBuf = (uint8_t*)malloc(MJPEG_BUF_SIZE);
+  // PSRAM first, so internal RAM stays free for the USB host stack.
+  // Falls back to internal RAM if PSRAM isn't enabled in the build.
+  const size_t fbBytes = VIDEO_W * VIDEO_H * 2;
+
+  mjpegBuf = (uint8_t*)heap_caps_malloc(MJPEG_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!mjpegBuf) mjpegBuf = (uint8_t*)heap_caps_malloc(MJPEG_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!mjpegBuf) {
     Serial.println("Video: JPEG buffer allocation failed");
     return false;
   }
 
-  // Frame buffer: try internal RAM first (faster), fall back to PSRAM.
-  const size_t fbBytes = VIDEO_W * VIDEO_H * 2;
-  frameBuf = (uint16_t*)heap_caps_malloc(fbBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (frameBuf) {
-    Serial.println("Video: frame buffer in internal RAM");
-  } else {
-    frameBuf = (uint16_t*)heap_caps_malloc(fbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (frameBuf) Serial.println("Video: frame buffer in PSRAM");
-  }
+  frameBuf = (uint16_t*)heap_caps_malloc(fbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!frameBuf) frameBuf = (uint16_t*)heap_caps_malloc(fbBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!frameBuf) {
-    Serial.println("Video: frame buffer allocation failed (no room, enable PSRAM?)");
+    Serial.println("Video: frame buffer allocation failed (no room)");
     return false;
   }
+
+  // If PSRAM is enabled, "PSRAM free" is about 8 MB minus ~200 KB.
+  Serial.printf("Video: buffers allocated (PSRAM free %u, internal free %u)\n",
+                (unsigned)ESP.getFreePsram(), (unsigned)ESP.getFreeHeap());
 
   videoFile = SD.open(path, FILE_READ);
   if (!videoFile) {

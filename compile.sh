@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SKETCH_DIR="${1:-$HOME}/programming_2026/esp32_s3_midi_host/"
-FQBN="esp32:esp32:esp32s3"
+FQBN="esp32:esp32:esp32s3:PSRAM=opi"
 BUILD_DIR="$SKETCH_DIR/build"
 
 if [[ ! -f "$SKETCH_DIR/$(basename "$SKETCH_DIR").ino" ]]; then
