@@ -17,6 +17,7 @@ constexpr int SD_MISO = 9;
 TFT_eSPI tft = TFT_eSPI();
 
 #include "mjpeg_video.h"
+#include "encoder_input.h"
 
 constexpr int MIDI_LOG_LINES = 8;
 
@@ -60,45 +61,6 @@ float phaseIncrement = 0.0f;
 i2s_chan_handle_t txHandle = nullptr;
 
 #include "audio_duplex.h"
-
-/* void setupAudio() {
-  i2s_chan_config_t chanConfig =
-      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-
-  ESP_ERROR_CHECK(
-      i2s_new_channel(&chanConfig, &txHandle, nullptr)
-  );
-
-  i2s_std_config_t stdConfig = {
-      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-
-      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-          I2S_DATA_BIT_WIDTH_16BIT,
-          I2S_SLOT_MODE_STEREO
-      ),
-
-      .gpio_cfg = {
-          .mclk = I2S_GPIO_UNUSED,
-          .bclk = (gpio_num_t)I2S_BCLK,
-          .ws = (gpio_num_t)I2S_LRCK,
-          .dout = (gpio_num_t)I2S_DOUT,
-          .din = I2S_GPIO_UNUSED,
-          .invert_flags = {
-              .mclk_inv = false,
-              .bclk_inv = false,
-              .ws_inv = false
-          }
-      }
-  };
-
-  ESP_ERROR_CHECK(
-      i2s_channel_init_std_mode(txHandle, &stdConfig)
-  );
-
-  ESP_ERROR_CHECK(i2s_channel_enable(txHandle));
-
-  Serial.println("I2S audio started.");
-	} */
 
 void setNoteOn(int note, int velocity) {
   if (velocity <= 0) {
@@ -247,11 +209,13 @@ void processMidi() {
 void loop() {
 
   processMidi();
+	encoderPoll();
 
 	if (Serial.available()) {
 		switch (Serial.read()) {
 		case 'r': mediaCmd = CMD_REC_START;  break;
 		case 'l': mediaCmd = CMD_PLAY_START; break;
+		case 'v': mediaCmd = CMD_VIDEO_START; break;			
 		case 's': mediaCmd = CMD_STOP;       break;
 		case 'p':
 			passthroughEnabled = !passthroughEnabled;
@@ -262,66 +226,6 @@ void loop() {
 
 	delay(1);
 }
-
-/* void audioTask(void* parameter) {
-  int16_t buffer[BLOCK_FRAMES * 2];
-
-  constexpr float RAMP_STEP =
-      1.0f / (SAMPLE_RATE * 0.005f);
-
-  for (;;) {
-    // Take a consistent snapshot of MIDI-controlled parameters.
-    float blockTargetAmplitude;
-    float blockPhaseIncrement;
-
-    portENTER_CRITICAL(&synthMux);
-    blockTargetAmplitude = targetAmplitude;
-    blockPhaseIncrement = phaseIncrement;
-    portEXIT_CRITICAL(&synthMux);
-
-    for (int i = 0; i < BLOCK_FRAMES; i++) {
-      if (currentAmplitude < blockTargetAmplitude) {
-        currentAmplitude += RAMP_STEP;
-        if (currentAmplitude > blockTargetAmplitude)
-          currentAmplitude = blockTargetAmplitude;
-      } else if (currentAmplitude > blockTargetAmplitude) {
-        currentAmplitude -= RAMP_STEP;
-        if (currentAmplitude < blockTargetAmplitude)
-          currentAmplitude = blockTargetAmplitude;
-      }
-
-      float sample = 0.0f;
-
-      if (currentAmplitude > 0.00001f) {
-        sample = sinf(phase) * currentAmplitude;
-
-        phase += blockPhaseIncrement;
-        if (phase >= TWO_PI)
-          phase -= TWO_PI;
-      }
-
-      int16_t pcm = (int16_t)(sample * 32767.0f);
-
-      buffer[i * 2] = pcm;
-      buffer[i * 2 + 1] = pcm;
-    }
-
-    size_t bytesWritten = 0;
-
-    esp_err_t result = i2s_channel_write(
-        txHandle,
-        buffer,
-        sizeof(buffer),
-        &bytesWritten,
-        1000
-    );
-
-    if (result != ESP_OK) {
-      Serial.printf("I2S write error: %d\n", result);
-    }
-  }
-}
-*/
 
 bool drawBmp(const char *filename, int16_t x, int16_t y) {
 
@@ -456,16 +360,9 @@ void setup() {
 
 	SPIClass& tftSPI = tft.getSPIinstance();
 
-	//	tftSPI.begin(36, 9, 35, -1);
-	//	SPI.begin(36, 9, 35, 10);
-
-	//	Serial.printf("TFT SPI: %p\n", (void*)&tftSPI);
-	//	Serial.printf("Global SPI: %p\n", (void*)&SPI);
-	
 	Serial.println("Initializing SD...");
 
 	bool sdOK = SD.begin(10, tftSPI, 20000000);
-	//	bool sdOK = SD.begin(10);
 	Serial.printf("SD init: %s\n", sdOK ? "OK" : "FAILED");
 
 	/*	Serial.println("Testing TFT...");
@@ -481,6 +378,8 @@ void setup() {
 	} else {
 		Serial.println("BMP open failed");
 		} */
+
+	encoderBegin();
 
 	if (sdOK) videoBegin("/video.mjpeg");
 

@@ -21,5 +21,7 @@ volatile AudioMode audioMode = AUDIO_IDLE;
 // The audio task only touches it while audioMode is not AUDIO_IDLE.
 volatile StreamBufferHandle_t audioSB = nullptr;
 
+volatile bool passthroughEnabled = false;
+
 volatile uint32_t sbOverruns  = 0;   // recording: blocks dropped (writer fell behind)
 volatile uint32_t sbUnderruns = 0;   // playback: blocks missing (reader fell behind)

@@ -23,7 +23,7 @@ constexpr int I2S_MCLK = 1;   // PCM1808 SCK
 i2s_chan_handle_t rxHandle = nullptr;
 
 // Toggle at runtime. Written by loop(), read by the audio task.
-volatile bool passthroughEnabled = false;
+// volatile bool passthroughEnabled = false;
 
 // 1.0 = input passes at full level. Lower it if the input plus synth clips.
 constexpr float PASSTHROUGH_GAIN = 1.0f;

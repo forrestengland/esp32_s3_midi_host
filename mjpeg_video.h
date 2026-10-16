@@ -1,12 +1,16 @@
-// mjpeg_video.h  (v3: media task)
-// One task owns the TFT and the SD card and runs in one of three states:
-//   M_VIDEO  - MJPEG playback (default)
-//   M_RECORD - writes ADC audio to /rec.raw (video stopped)
-//   M_PLAY   - streams /rec.raw into the audio output (video stopped)
+// mjpeg_video.h  (v4: media task with menu)
+// One task owns the TFT and the SD card and runs in one of four states:
+//   M_MENU   - menu on screen (default at boot)
+//   M_VIDEO  - MJPEG playback
+//   M_RECORD - writes ADC audio to /rec.raw
+//   M_PLAY   - streams /rec.raw into the audio output
+//
+// Encoder events (ui_events.h) drive the menu. Click or long press leaves
+// video, recording and playback and returns to the menu.
 //
 // Raw file format: signed 16-bit little-endian, stereo, 44100 Hz.
 //
-// Requires: JPEGDEC library, audio_shared.h.
+// Requires: JPEGDEC library, audio_shared.h, ui_events.h.
 // Only the media task may touch the TFT or SD after videoBegin().
 
 #pragma once
@@ -17,6 +21,7 @@
 #include <JPEGDEC.h>
 #include "esp_heap_caps.h"
 #include "audio_shared.h"
+#include "ui_events.h"
 
 extern TFT_eSPI tft;
 
@@ -32,12 +37,24 @@ constexpr size_t      IO_CHUNK       = 4096;        // SD read/write size
 constexpr uint32_t    REC_BYTES_PER_SEC = 44100 * 2 * 2;
 constexpr size_t      BLOCK_BYTES_MIN   = 128 * 2 * 2;   // one audio block (BLOCK_FRAMES * 2 ch * 2 bytes)
 
-// ---- Commands (set from loop(), consumed by the media task) ----
-enum MediaCmd : uint8_t { CMD_NONE = 0, CMD_REC_START, CMD_PLAY_START, CMD_STOP };
+// ---- Serial/other commands (set from loop(), consumed by the media task) ----
+enum MediaCmd : uint8_t { CMD_NONE = 0, CMD_REC_START, CMD_PLAY_START, CMD_VIDEO_START, CMD_STOP };
 volatile MediaCmd mediaCmd = CMD_NONE;
 
-enum MediaState : uint8_t { M_VIDEO, M_RECORD, M_PLAY };
-static MediaState mediaState = M_VIDEO;
+enum MediaState : uint8_t { M_MENU, M_VIDEO, M_RECORD, M_PLAY };
+static MediaState mediaState = M_MENU;
+
+// ---- Menu ----
+enum MenuItem : uint8_t { MI_VIDEO = 0, MI_RECORD, MI_PLAY, MI_PASSTHROUGH, MENU_COUNT };
+static const char* MENU_ITEMS[MENU_COUNT] = {
+  "Play video", "Record", "Play recording", "Passthrough"
+};
+constexpr int MENU_TOP   = 44;
+constexpr int MENU_ROW_H = 44;
+
+static int  menuIndex = 0;
+static bool menuDirty = false;
+static bool drawnPass = false;
 
 // ---- Video state ----
 static File      videoFile;
@@ -56,11 +73,91 @@ static File      recFile;
 static File      playFile;
 static uint32_t  recBytes = 0;
 static uint32_t  lastRecPrint = 0;
+static uint32_t  lastTimeDraw = 0;
 static bool      playEof = false;
 static uint8_t   ioChunk[IO_CHUNK];
 
 static StaticStreamBuffer_t sbStruct;
 static uint8_t*             sbStorage = nullptr;
+
+// ------------------------------------------------------------------
+// Screen helpers (media task only)
+// ------------------------------------------------------------------
+
+static void showStatus(const char* text, uint16_t color, const char* hint) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(40, 70);
+  tft.print(text);
+
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(40, 175);
+  tft.print(hint);
+}
+
+// total < 0 means "no total".
+static void drawTime(uint32_t sec, int32_t total) {
+  char buf[28];
+  if (total >= 0) {
+    snprintf(buf, sizeof(buf), "%lu / %ld s    ", (unsigned long)sec, (long)total);
+  } else {
+    snprintf(buf, sizeof(buf), "%lu s    ", (unsigned long)sec);
+  }
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(40, 125);
+  tft.print(buf);
+}
+
+// ------------------------------------------------------------------
+// Menu
+// ------------------------------------------------------------------
+
+static void drawMenuRows() {
+  char label[28];
+  tft.setTextSize(2);
+
+  for (int i = 0; i < MENU_COUNT; i++) {
+    int y = MENU_TOP + i * MENU_ROW_H;
+    bool sel = (i == menuIndex);
+    uint16_t bg = sel ? TFT_NAVY : TFT_BLACK;
+    uint16_t fg = sel ? TFT_WHITE : TFT_LIGHTGREY;
+
+    tft.fillRect(0, y, VIDEO_W, MENU_ROW_H - 4, bg);
+
+    if (i == MI_PASSTHROUGH) {
+      snprintf(label, sizeof(label), "Passthrough: %s", passthroughEnabled ? "ON" : "OFF");
+    } else {
+      snprintf(label, sizeof(label), "%s", MENU_ITEMS[i]);
+    }
+
+    tft.setTextColor(fg, bg);
+    tft.setCursor(14, y + 12);
+    tft.print(label);
+  }
+
+  menuDirty = false;
+  drawnPass = passthroughEnabled;
+}
+
+static void enterMenu() {
+  mediaState = M_MENU;
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(14, 10);
+  tft.print("MENU");
+
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(14, 228);
+  tft.print("turn: select   click: go   long press: back");
+
+  drawMenuRows();
+}
 
 // ------------------------------------------------------------------
 // Video
@@ -161,7 +258,7 @@ static void videoStep() {
   }
 }
 
-static void resumeVideo() {
+static void startVideo() {
   mediaState = M_VIDEO;
   nextFrameAt = millis();
   statStart = millis();
@@ -199,14 +296,6 @@ static void sbDestroy() {
   sbStorage = nullptr;   // storage is the video frame buffer, not freed here
 }
 
-static void showStatus(const char* text, uint16_t color) {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.setTextSize(3);
-  tft.setCursor(40, 105);
-  tft.print(text);
-}
-
 // ------------------------------------------------------------------
 // Recording
 // ------------------------------------------------------------------
@@ -222,14 +311,16 @@ static void startRecording() {
     return;
   }
 
-  showStatus("RECORDING", TFT_RED);
+  showStatus("RECORDING", TFT_RED, "Click to stop");
+  drawTime(0, -1);
 
   recBytes = 0;
   sbOverruns = 0;
   lastRecPrint = millis();
+  lastTimeDraw = millis();
   audioMode = AUDIO_RECORDING;
   mediaState = M_RECORD;
-  Serial.println("Recording started (s to stop)");
+  Serial.println("Recording started");
 }
 
 static void stopRecording() {
@@ -253,7 +344,7 @@ static void stopRecording() {
     Serial.println("Warning: the SD card couldn't keep up, so the recording has gaps.");
   }
 
-  resumeVideo();
+  enterMenu();
 }
 
 static void recordStep() {
@@ -268,8 +359,15 @@ static void recordStep() {
     }
   }
 
-  if (millis() - lastRecPrint >= 2000) {
-    lastRecPrint = millis();
+  uint32_t now = millis();
+
+  if (now - lastTimeDraw >= 1000) {
+    lastTimeDraw = now;
+    drawTime(recBytes / REC_BYTES_PER_SEC, -1);
+  }
+
+  if (now - lastRecPrint >= 2000) {
+    lastRecPrint = now;
     Serial.printf("REC %.0f s, %lu dropped blocks\n",
                   (float)recBytes / REC_BYTES_PER_SEC,
                   (unsigned long)sbOverruns);
@@ -297,7 +395,7 @@ static void playFeed() {
 static void startPlayback() {
   playFile = SD.open(REC_PATH, FILE_READ);
   if (!playFile) {
-    Serial.println("No recording found (record one with r)");
+    Serial.println("No recording found (record one first)");
     return;
   }
 
@@ -306,7 +404,8 @@ static void startPlayback() {
     return;
   }
 
-  showStatus("PLAYING", TFT_GREEN);
+  showStatus("PLAYING", TFT_GREEN, "Click to stop");
+  drawTime(0, (int32_t)(playFile.size() / REC_BYTES_PER_SEC));
 
   // Prefill so playback starts with a full buffer.
   playEof = false;
@@ -315,9 +414,10 @@ static void startPlayback() {
   }
 
   sbUnderruns = 0;
+  lastTimeDraw = millis();
   audioMode = AUDIO_PLAYING;
   mediaState = M_PLAY;
-  Serial.println("Playback started (s to stop)");
+  Serial.println("Playback started");
 }
 
 static void stopPlayback() {
@@ -326,7 +426,7 @@ static void stopPlayback() {
   sbDestroy();
 
   Serial.printf("Playback stopped, %lu underrun blocks\n", (unsigned long)sbUnderruns);
-  resumeVideo();
+  enterMenu();
 }
 
 static void playStep() {
@@ -340,28 +440,81 @@ static void playStep() {
     return;
   }
 
+  uint32_t now = millis();
+  if (now - lastTimeDraw >= 1000) {
+    lastTimeDraw = now;
+    drawTime(playFile.position() / REC_BYTES_PER_SEC,
+             (int32_t)(playFile.size() / REC_BYTES_PER_SEC));
+  }
+
   vTaskDelay(pdMS_TO_TICKS(3));
 }
 
 // ------------------------------------------------------------------
-// Task
+// Input handling
 // ------------------------------------------------------------------
 
+static void menuSelect() {
+  switch (menuIndex) {
+    case MI_VIDEO:       startVideo();     break;
+    case MI_RECORD:      startRecording(); break;
+    case MI_PLAY:        startPlayback();  break;
+    case MI_PASSTHROUGH:
+      passthroughEnabled = !passthroughEnabled;
+      menuDirty = true;
+      break;
+  }
+}
+
+static void handleUi(UiEvent ev) {
+  switch (mediaState) {
+    case M_MENU:
+      if (ev == UI_UP) {
+        menuIndex = (menuIndex + MENU_COUNT - 1) % MENU_COUNT;
+        menuDirty = true;
+      } else if (ev == UI_DOWN) {
+        menuIndex = (menuIndex + 1) % MENU_COUNT;
+        menuDirty = true;
+      } else if (ev == UI_CLICK) {
+        menuSelect();
+      }
+      break;
+
+    case M_VIDEO:
+      if (ev == UI_CLICK || ev == UI_LONG) enterMenu();
+      break;
+
+    case M_RECORD:
+      if (ev == UI_CLICK || ev == UI_LONG) stopRecording();
+      break;
+
+    case M_PLAY:
+      if (ev == UI_CLICK || ev == UI_LONG) stopPlayback();
+      break;
+  }
+}
+
+// Serial commands: usable in addition to the encoder.
 static void handleCmd(MediaCmd cmd) {
+  bool idle = (mediaState == M_MENU || mediaState == M_VIDEO);
+
   switch (cmd) {
     case CMD_REC_START:
-      if (mediaState == M_VIDEO) startRecording();
-      else Serial.println("Busy: press s to stop first");
+      if (idle) startRecording(); else Serial.println("Busy: press s to stop first");
       break;
 
     case CMD_PLAY_START:
-      if (mediaState == M_VIDEO) startPlayback();
-      else Serial.println("Busy: press s to stop first");
+      if (idle) startPlayback(); else Serial.println("Busy: press s to stop first");
+      break;
+
+    case CMD_VIDEO_START:
+      if (idle) startVideo(); else Serial.println("Busy: press s to stop first");
       break;
 
     case CMD_STOP:
       if (mediaState == M_RECORD) stopRecording();
       else if (mediaState == M_PLAY) stopPlayback();
+      else if (mediaState == M_VIDEO) enterMenu();
       break;
 
     default:
@@ -369,8 +522,12 @@ static void handleCmd(MediaCmd cmd) {
   }
 }
 
+// ------------------------------------------------------------------
+// Task
+// ------------------------------------------------------------------
+
 static void mediaTask(void*) {
-  resumeVideo();
+  enterMenu();
 
   for (;;) {
     MediaCmd cmd = mediaCmd;
@@ -379,7 +536,17 @@ static void mediaTask(void*) {
       handleCmd(cmd);
     }
 
+    UiEvent ev;
+    while (uiReceive(ev)) {
+      handleUi(ev);
+    }
+
     switch (mediaState) {
+      case M_MENU:
+        // Redraw once per batch of events (and if passthrough changed via serial).
+        if (menuDirty || drawnPass != passthroughEnabled) drawMenuRows();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        break;
       case M_VIDEO:  videoStep();  break;
       case M_RECORD: recordStep(); break;
       case M_PLAY:   playStep();   break;
@@ -389,6 +556,8 @@ static void mediaTask(void*) {
 
 // Call from setup() AFTER tft.init() and SD.begin() have succeeded.
 bool videoBegin(const char* path) {
+  uiEventsInit();
+
   mjpegBuf = (uint8_t*)malloc(MJPEG_BUF_SIZE);
   if (!mjpegBuf) {
     Serial.println("Video: JPEG buffer allocation failed");
@@ -423,43 +592,6 @@ bool videoBegin(const char* path) {
     return false;
   }
 
-  Serial.println("Serial commands: r = record, s = stop, l = play, p = passthrough");
+  Serial.println("Serial commands: r = record, l = play, v = video, s = stop/menu, p = passthrough");
   return true;
 }
-
-/* ------------------------------------------------------------------
-   Sketch changes
-   ------------------------------------------------------------------
-
-   Include order at the top of the sketch:
-
-     TFT_eSPI tft = TFT_eSPI();
-     #include "mjpeg_video.h"          // after tft
-     ...your globals (SAMPLE_RATE, BLOCK_FRAMES, synthMux, txHandle...)
-     #include "audio_duplex.h"         // after the globals
-
-   loop():
-
-     void loop() {
-       processMidi();
-
-       if (Serial.available()) {
-         switch (Serial.read()) {
-           case 'r': mediaCmd = CMD_REC_START;  break;
-           case 'l': mediaCmd = CMD_PLAY_START; break;
-           case 's': mediaCmd = CMD_STOP;       break;
-           case 'p':
-             passthroughEnabled = !passthroughEnabled;
-             Serial.printf("Passthrough %s\n", passthroughEnabled ? "ON" : "OFF");
-             break;
-         }
-       }
-
-       delay(1);
-     }
-
-   Play a recording on a computer:
-     ffplay -f s16le -ar 44100 -ac 2 rec.raw
-   Convert to WAV:
-     ffmpeg -f s16le -ar 44100 -ac 2 -i rec.raw rec.wav
-   ------------------------------------------------------------------ */
