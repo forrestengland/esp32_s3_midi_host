@@ -1,16 +1,20 @@
-// audio_duplex.h
+// audio_duplex.h  (v3)
 // Full-duplex I2S: PCM5102 out (TX) + PCM1808 in (RX) on one shared clock.
+// Adds: record tap (ADC input -> stream buffer) and playback mix
+// (stream buffer -> output) controlled by audioMode from audio_shared.h.
 //
-// How to use:
-//  1. DELETE your existing setupAudio() and audioTask() from the sketch.
+// Usage:
+//  1. DELETE your existing setupAudio() and audioTask() from the sketch
+//     (and any debug min/max code you added).
 //  2. Keep your globals (SAMPLE_RATE, BLOCK_FRAMES, synthMux, targetAmplitude,
 //     currentAmplitude, phase, phaseIncrement, txHandle, I2S_BCLK/LRCK/DOUT).
 //  3. Add  #include "audio_duplex.h"  right after those globals.
-//  4. In setup(), raise the AudioTask stack from 4096 to 6144.
+//  4. AudioTask stack should be 6144 in setup().
 
 #pragma once
 
 #include "driver/i2s_std.h"
+#include "audio_shared.h"
 
 // ---- New pins (change to free GPIOs on your board) ----
 constexpr int I2S_DIN  = 2;    // PCM1808 OUT
@@ -23,10 +27,6 @@ volatile bool passthroughEnabled = false;
 
 // 1.0 = input passes at full level. Lower it if the input plus synth clips.
 constexpr float PASSTHROUGH_GAIN = 1.0f;
-
-volatile int16_t dbgMin, dbgMax;
-volatile int dbgRx;
-volatile size_t dbgBytes;
 
 void setupAudio() {
   i2s_chan_config_t chanConfig =
@@ -65,6 +65,9 @@ void setupAudio() {
   // RX keeps the top 16 bits of the ADC's 24-bit sample.
   stdConfig.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
 
+  // REQUIRED: the default config sets the word-select width to the 16-bit data
+  // width, so with 32-bit slots WS would be high for 16 of 64 clocks (uneven
+  // channels). It must be 32 so each channel gets half the frame.
   stdConfig.slot_cfg.ws_width = 32;
 
   // Same config for both directions, as required for a shared clock.
@@ -80,6 +83,7 @@ void setupAudio() {
 void audioTask(void* parameter) {
   int16_t outBuf[BLOCK_FRAMES * 2];
   int16_t inBuf[BLOCK_FRAMES * 2];
+  int16_t playBuf[BLOCK_FRAMES * 2];
 
   constexpr float RAMP_STEP =
       1.0f / (SAMPLE_RATE * 0.005f);
@@ -94,20 +98,35 @@ void audioTask(void* parameter) {
     blockPhaseIncrement = phaseIncrement;
     portEXIT_CRITICAL(&synthMux);
 
-    // Always read the ADC so RX never overruns; the data is only used if enabled.
+    // Always read the ADC so RX never overruns.
     size_t bytesRead = 0;
     esp_err_t rxResult = i2s_channel_read(
         rxHandle, inBuf, sizeof(inBuf), &bytesRead, 1000);
     bool inputValid = (rxResult == ESP_OK && bytesRead == sizeof(inBuf));
     bool passthrough = passthroughEnabled && inputValid;
 
-    int16_t mn = 32767, mx = -32768;
-    for (int i = 0; i < BLOCK_FRAMES; i++) {
-      int16_t s = inBuf[i * 2];          // left channel
-      if (s < mn) mn = s;
-      if (s > mx) mx = s;
+    AudioMode mode = audioMode;
+    StreamBufferHandle_t sb = audioSB;
+
+    // ---- Recording tap: copy the raw ADC block (whole blocks only) ----
+    if (mode == AUDIO_RECORDING && sb && inputValid) {
+      if (xStreamBufferSpacesAvailable(sb) >= sizeof(inBuf)) {
+        xStreamBufferSend(sb, inBuf, sizeof(inBuf), 0);
+      } else {
+        sbOverruns++;
+      }
     }
-    dbgMin = mn; dbgMax = mx; dbgRx = rxResult; dbgBytes = bytesRead;
+
+    // ---- Playback: fetch one whole block if available ----
+    bool havePlay = false;
+    if (mode == AUDIO_PLAYING && sb) {
+      if (xStreamBufferBytesAvailable(sb) >= sizeof(playBuf)) {
+        xStreamBufferReceive(sb, playBuf, sizeof(playBuf), 0);
+        havePlay = true;
+      } else {
+        sbUnderruns++;
+      }
+    }
 
     for (int i = 0; i < BLOCK_FRAMES; i++) {
       // ---- synth (unchanged) ----
@@ -133,13 +152,18 @@ void audioTask(void* parameter) {
 
       int32_t synthPcm = (int32_t)(sample * 32767.0f);
 
-      // ---- mix in the ADC input when enabled ----
+      // ---- mix: synth + live input (if enabled) + playback (if playing) ----
       int32_t left  = synthPcm;
       int32_t right = synthPcm;
 
       if (passthrough) {
         left  += (int32_t)(inBuf[i * 2]     * PASSTHROUGH_GAIN);
         right += (int32_t)(inBuf[i * 2 + 1] * PASSTHROUGH_GAIN);
+      }
+
+      if (havePlay) {
+        left  += playBuf[i * 2];
+        right += playBuf[i * 2 + 1];
       }
 
       if (left  >  32767) left  =  32767;
@@ -166,23 +190,3 @@ void audioTask(void* parameter) {
     }
   }
 }
-
-/* ------------------------------------------------------------------
-   Toggle from loop() with a Serial command (type 'p' in the monitor):
-
-     void loop() {
-       processMidi();
-
-       if (Serial.available()) {
-         char c = Serial.read();
-         if (c == 'p') {
-           passthroughEnabled = !passthroughEnabled;
-           Serial.printf("Passthrough %s\n", passthroughEnabled ? "ON" : "OFF");
-         }
-       }
-
-       delay(1);
-     }
-
-   A button works the same way: read a GPIO in loop() and flip the flag.
-   ------------------------------------------------------------------ */

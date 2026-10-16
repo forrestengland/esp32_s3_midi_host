@@ -11,12 +11,12 @@
 #include <SPI.h>
 #include <SD.h>
 
-#include "mjpeg_video.h"
-
 constexpr int SD_CS = 10;
 constexpr int SD_MISO = 9;
 
 TFT_eSPI tft = TFT_eSPI();
+
+#include "mjpeg_video.h"
 
 constexpr int MIDI_LOG_LINES = 8;
 
@@ -248,19 +248,19 @@ void loop() {
 
   processMidi();
 
-	static uint32_t lastPrint = 0;
-	if (millis() - lastPrint > 500) {
-		lastPrint = millis();
-		Serial.printf("RX err=%d bytes=%u  L min=%d max=%d\n",
-									dbgRx, (unsigned)dbgBytes, dbgMin, dbgMax);
+	if (Serial.available()) {
+		switch (Serial.read()) {
+		case 'r': mediaCmd = CMD_REC_START;  break;
+		case 'l': mediaCmd = CMD_PLAY_START; break;
+		case 's': mediaCmd = CMD_STOP;       break;
+		case 'p':
+			passthroughEnabled = !passthroughEnabled;
+			Serial.printf("Passthrough %s\n", passthroughEnabled ? "ON" : "OFF");
+			break;
+		}
 	}
- 
-	delay(1);
 
-	//  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
-	//    lastDisplayUpdate = millis();
-	//    drawMidiLog();
-	//  }
+	delay(1);
 }
 
 /* void audioTask(void* parameter) {
